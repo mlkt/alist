@@ -67,8 +67,13 @@ func (d *AliyundriveOpen) getUploadUrl(count int, fileId, uploadId string) ([]Pa
 func (d *AliyundriveOpen) uploadPart(ctx context.Context, r io.Reader, partInfo PartInfo) error {
 	uploadUrl := partInfo.UploadUrl
 	if d.InternalUpload {
-		uploadUrl = strings.ReplaceAll(uploadUrl, "https://cn-beijing-data.aliyundrive.net/", "http://ccp-bj29-bj-1592982087.oss-cn-beijing-internal.aliyuncs.com/")
+		if d.internalUploadUrlPattern != nil {
+			uploadUrl = d.internalUploadUrlPattern.ReplaceAllString(uploadUrl, d.internalUploadUrlReplacement)
+		} else {
+			uploadUrl = strings.ReplaceAll(uploadUrl, "https://cn-beijing-data.aliyundrive.net/", "http://ccp-bj29-bj-1592982087.oss-cn-beijing-internal.aliyuncs.com/")
+		}
 	}
+	log.Infof("[aliyundrive_open] UploadUrl: %s", uploadUrl)
 	req, err := http.NewRequestWithContext(ctx, "PUT", uploadUrl, r)
 	if err != nil {
 		return err

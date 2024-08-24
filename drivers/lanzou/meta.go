@@ -18,6 +18,9 @@ type Addition struct {
 	BaseUrl        string `json:"baseUrl" required:"true" default:"https://pc.woozooo.com" help:"basic URL for file operation"`
 	ShareUrl       string `json:"shareUrl" required:"true" default:"https://pan.lanzouo.com" help:"used to get the sharing page"`
 	RepairFileInfo bool   `json:"repair_file_info" help:"To use webdav, you need to enable it"`
+
+	LongFileName bool
+	FlatRootDir  string
 }
 
 func (a *Addition) IsCookie() bool {

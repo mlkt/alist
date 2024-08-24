@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"regexp"
 	"time"
 
 	"github.com/Xhofe/rateg"
@@ -14,6 +16,7 @@ import (
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/go-resty/resty/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 type AliyundriveOpen struct {
@@ -22,6 +25,12 @@ type AliyundriveOpen struct {
 	base string
 
 	DriveId string
+
+	internalUploadUrlPattern     *regexp.Regexp
+	internalUploadUrlReplacement string
+
+	internalDownloadUrlPattern     *regexp.Regexp
+	internalDownloadUrlReplacement string
 
 	limitList func(ctx context.Context, data base.Json) (*Files, error)
 	limitLink func(ctx context.Context, file model.Obj) (*model.Link, error)
@@ -42,6 +51,23 @@ func (d *AliyundriveOpen) Init(ctx context.Context) error {
 	if d.DriveType == "" {
 		d.DriveType = "default"
 	}
+
+	uploadUrlPattern := os.Getenv("ALIST_ALIYUNPAN_OPEN_INTERNAL_UPLOAD_URL_PATTERN")
+	uploadUrlReplacement := os.Getenv("ALIST_ALIYUNPAN_OPEN_INTERNAL_UPLOAD_URL_REPLACEMENT")
+	if uploadUrlPattern != "" && uploadUrlReplacement != "" {
+		d.internalUploadUrlPattern = regexp.MustCompile(uploadUrlPattern)
+		d.internalUploadUrlReplacement = uploadUrlReplacement
+		log.Infof("[aliyundrive_open] uploadUrlPattern: %s, uploadUrlReplacement: %s", uploadUrlPattern, uploadUrlReplacement)
+	}
+
+	downloadUrlPattern := os.Getenv("ALIST_ALIYUNPAN_OPEN_INTERNAL_DOWNLOAD_URL_PATTERN")
+	downloadUrlReplacement := os.Getenv("ALIST_ALIYUNPAN_OPEN_INTERNAL_DOWNLOAD_URL_REPLACEMENT")
+	if downloadUrlPattern != "" && downloadUrlReplacement != "" {
+		d.internalDownloadUrlPattern = regexp.MustCompile(downloadUrlPattern)
+		d.internalDownloadUrlReplacement = downloadUrlReplacement
+		log.Infof("[aliyundrive_open] downloadUrlPattern: %s, downloadUrlReplacement: %s", downloadUrlPattern, downloadUrlReplacement)
+	}
+
 	res, err := d.request("/adrive/v1.0/user/getDriveInfo", http.MethodPost, nil)
 	if err != nil {
 		return err
@@ -93,6 +119,10 @@ func (d *AliyundriveOpen) link(ctx context.Context, file model.Obj) (*model.Link
 		}
 		url = utils.Json.Get(res, "streamsUrl", d.LIVPDownloadFormat).ToString()
 	}
+	if d.internalDownloadUrlPattern != nil {
+		url = d.internalDownloadUrlPattern.ReplaceAllString(url, d.internalDownloadUrlReplacement)
+	}
+	log.Infof("[aliyundrive_open] download url: %s", url)
 	exp := time.Minute
 	return &model.Link{
 		URL:        url,

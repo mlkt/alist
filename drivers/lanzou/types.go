@@ -48,6 +48,7 @@ type FileOrFolder struct {
 	//FolderDes  string `json:"folder_des"`
 
 	// 缓存字段
+	parentId   string     `json:"-"`
 	size       *int64     `json:"-"`
 	time       *time.Time `json:"-"`
 	repairFlag bool       `json:"-"`
@@ -138,6 +139,7 @@ type FileOrFolderByShareUrl struct {
 	Pwd string `json:"-"`
 
 	// 缓存字段
+	parentId   string     `json:"-"`
 	size       *int64     `json:"-"`
 	time       *time.Time `json:"-"`
 	repairFlag bool       `json:"-"`

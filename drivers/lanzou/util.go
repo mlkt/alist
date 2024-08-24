@@ -1,9 +1,12 @@
 package lanzou
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/time/rate"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -11,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/model"
@@ -21,6 +25,7 @@ import (
 )
 
 var upClient *resty.Client
+var reqClient *resty.Client
 var once sync.Once
 
 func (d *LanZou) doupload(callback base.ReqCallback, resp interface{}) ([]byte, error) {
@@ -63,7 +68,11 @@ func (d *LanZou) post(url string, callback base.ReqCallback, resp interface{}) (
 func (d *LanZou) _post(url string, callback base.ReqCallback, resp interface{}, up bool) ([]byte, error) {
 	data, err := d.request(url, http.MethodPost, func(req *resty.Request) {
 		req.AddRetryCondition(func(r *resty.Response, err error) bool {
-			if utils.Json.Get(r.Body(), "zt").ToInt() == 4 {
+			if r == nil {
+				return false
+			}
+			value := utils.Json.Get(r.Body(), "zt")
+			if value != nil && value.ToInt() == 4 {
 				time.Sleep(time.Second)
 				return true
 			}
@@ -76,7 +85,11 @@ func (d *LanZou) _post(url string, callback base.ReqCallback, resp interface{}, 
 	if err != nil {
 		return data, err
 	}
-	switch utils.Json.Get(data, "zt").ToInt() {
+	zt := 0
+	if value := utils.Json.Get(data, "zt"); value != nil {
+		zt = value.ToInt()
+	}
+	switch zt {
 	case 1, 2, 4:
 		if resp != nil {
 			// 返回类型不统一,忽略错误
@@ -86,25 +99,54 @@ func (d *LanZou) _post(url string, callback base.ReqCallback, resp interface{}, 
 	case 9: // 登录过期
 		return data, ErrCookieExpiration
 	default:
-		info := utils.Json.Get(data, "inf").ToString()
+		get := func(key string) string {
+			value := utils.Json.Get(data, key)
+			if value == nil {
+				return ""
+			}
+			return value.ToString()
+		}
+		info := get("inf")
 		if info == "" {
-			info = utils.Json.Get(data, "info").ToString()
+			info = get("info")
 		}
 		return data, fmt.Errorf(info)
 	}
 }
 
-func (d *LanZou) request(url string, method string, callback base.ReqCallback, up bool) ([]byte, error) {
-	var req *resty.Request
-	if up {
-		once.Do(func() {
-			upClient = base.NewRestyClient().SetTimeout(120 * time.Second)
-		})
-		req = upClient.R()
-	} else {
-		req = base.RestyClient.R()
-	}
+type WaitRateLimiter struct {
+	limiter *rate.Limiter
+}
 
+func (r *WaitRateLimiter) Allow() bool {
+	err := r.limiter.Wait(context.Background())
+	if err != nil {
+		return false
+	}
+	return true
+}
+
+func (d *LanZou) request(url string, method string, callback base.ReqCallback, upload bool) ([]byte, error) {
+	req := (func() *resty.Request {
+		once.Do(func() {
+			qps := 20
+			upTimeout := 120
+			if value, _ := strconv.Atoi(os.Getenv("ALIST_LANZOU_QPS")); value > 0 {
+				qps = value
+			}
+			if value, _ := strconv.Atoi(os.Getenv("ALIST_LANZOU_UPLOAD_TIMEOUT")); value > 0 {
+				upTimeout = value
+			}
+			limiter := &WaitRateLimiter{limiter: rate.NewLimiter(rate.Limit(qps), 2)}
+			reqClient = base.NewRestyClient().SetRateLimiter(limiter)
+			upClient = base.NewRestyClient().SetTimeout(time.Duration(int64(upTimeout) * int64(time.Second))).SetRateLimiter(limiter)
+		})
+		if upload {
+			return upClient.R()
+		} else {
+			return reqClient.R()
+		}
+	})()
 	req.SetHeaders(map[string]string{
 		"Referer": "https://pc.woozooo.com",
 	})
@@ -144,6 +186,9 @@ func (d *LanZou) Login() ([]*http.Cookie, error) {
 		return nil, fmt.Errorf("login err: %s", resp.Body())
 	}
 	d.Cookie = CookieToString(resp.Cookies())
+	if d.flatInstance != nil {
+		d.flatInstance.Cookie = d.Cookie
+	}
 	return resp.Cookies(), nil
 }
 
@@ -168,6 +213,33 @@ func (d *LanZou) GetAllFiles(folderID string) ([]model.Obj, error) {
 			return &file
 		})...,
 	), nil
+}
+
+func (d *LanZou) GetFolderPath(folderID string) (string, error) {
+	if folderID == "-1" {
+		return "/", nil
+	}
+	var resp RespInfo[[]FileOrFolder]
+	_, err := d.doupload(func(req *resty.Request) {
+		req.SetFormData(map[string]string{
+			"task":      "47",
+			"folder_id": folderID,
+		})
+	}, &resp)
+	if err != nil {
+		return "", err
+	}
+	list := resp.Info
+	names := make([]string, len(list))
+	for i, folder := range list {
+		if fakeSuffix || d.RepairFileInfo {
+			names[i] = unescapeFileName(folder.Name)
+		} else {
+			names[i] = folder.Name
+		}
+	}
+	path := strings.Join(names, "/")
+	return "/" + path, nil
 }
 
 // 通过ID获取文件夹
@@ -528,4 +600,95 @@ func (d *LanZou) getVeiAndUid() (vei string, uid string, err error) {
 	vei = data["vei"]
 
 	return
+}
+
+const base63Charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+
+func toBase63(num int64) string {
+	negative := num < 0
+	if num == 0 {
+		return string(base63Charset[0])
+	}
+	base := int64(len(base63Charset))
+	var result string
+	for num > 0 {
+		result = string(base63Charset[num%base]) + result
+		num /= base
+	}
+	if negative {
+		return "-" + result
+	}
+	return result
+}
+
+func fromBase63(str string) (int64, error) {
+	if len(str) == 0 {
+		return 0, errors.New("empty value")
+	}
+	negative := str[0] == '-'
+	if negative {
+		str = str[1:]
+	}
+	var result int64
+	base := int64(len(base63Charset))
+	for _, ch := range str {
+		index := strings.IndexRune(base63Charset, ch)
+		if index == -1 {
+			return 0, errors.New("invalid value")
+		}
+		result = result*base + int64(index)
+	}
+	if negative {
+		result = -result
+	}
+	return result, nil
+}
+
+func splitByLength(str string, length int) []string {
+	var result []string
+	for len(str) >= length {
+		result = append(result, str[:length])
+		str = str[length:]
+	}
+	if len(str) > 0 {
+		result = append(result, str)
+	}
+	return result
+}
+
+func escapeFileName(fileName string) (string, error) {
+	var result strings.Builder
+	for _, ch := range fileName {
+		if ch == '.' || ch == '_' || ch == '-' || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') {
+			result.WriteRune(ch)
+		} else if ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '"' || ch == '<' || ch == '>' {
+			return "", errors.New("invalid filename character: " + string(ch))
+		} else if ch <= unicode.MaxASCII {
+			result.WriteString("_u")
+			result.WriteString(strconv.FormatInt(int64(ch), 16))
+		} else {
+			result.WriteRune(ch)
+		}
+	}
+	return result.String(), nil
+}
+
+func unescapeFileName(fileName string) string {
+	var result strings.Builder
+	n := len(fileName)
+	for i := 0; i < n; i++ {
+		ch := fileName[i]
+		if ch == '_' && i+3 < n && fileName[i+1] == 'u' {
+			hex, err := strconv.ParseInt(fileName[i+2:i+4], 16, 32)
+			if err == nil {
+				result.WriteRune(rune(hex))
+				i += 3
+			} else {
+				result.WriteByte(ch)
+			}
+		} else {
+			result.WriteByte(ch)
+		}
+	}
+	return result.String()
 }

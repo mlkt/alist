@@ -3,7 +3,6 @@ package seafile
 import (
 	"errors"
 	"fmt"
-	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"net/http"
 	"strings"
@@ -70,13 +69,12 @@ func (d *Seafile) getRepoAndPath(fullPath string) (repo *LibraryInfo, path strin
 	libraryMap := d.libraryMap
 	repoId := d.Addition.RepoId
 	if repoId != "" {
-		if len(repoId) == 36 /* uuid */ {
-			for _, library := range libraryMap {
-				if library.Id == repoId {
-					return library, fullPath, nil
-				}
+		for _, library := range libraryMap {
+			if library.Id == repoId {
+				return library, fullPath, nil
 			}
 		}
+		return nil, "", errors.New(fmt.Sprintf(`seafile library with ID "%s" not found`, repoId))
 	} else {
 		var repoName string
 		str := fullPath[1:]
@@ -90,8 +88,8 @@ func (d *Seafile) getRepoAndPath(fullPath string) (repo *LibraryInfo, path strin
 		if library, ok := libraryMap[repoName]; ok {
 			return library, path, nil
 		}
+		return nil, "", errors.New(fmt.Sprintf(`seafile library "%s" not found`, repoName))
 	}
-	return nil, "", errs.ObjectNotFound
 }
 
 func (d *Seafile) listLibraries() (resp []LibraryItemResp, err error) {
@@ -105,9 +103,15 @@ func (d *Seafile) listLibraries() (resp []LibraryItemResp, err error) {
 		_, err = d.request(http.MethodGet, fmt.Sprintf("/api2/repos/%s/", repoId), func(req *resty.Request) {
 			req.SetResult(&oneResp)
 		})
-		if err == nil {
-			resp = append(resp, oneResp)
+		if err != nil {
+			if !strings.Contains(err.Error(), `<html`) {
+				return nil, err
+			}
 		}
+		if oneResp.Id == "" || oneResp.Name == "" {
+			return nil, errors.New(fmt.Sprintf(`seafile library with ID "%s" not found`, repoId))
+		}
+		resp = append(resp, oneResp)
 	}
 	if err != nil {
 		return nil, err
@@ -135,15 +139,12 @@ func (d *Seafile) listLibraries() (resp []LibraryItemResp, err error) {
 	return resp, nil
 }
 
-var repoPwdNotConfigured = errors.New("library password not configured")
-var repoPwdIncorrect = errors.New("library password is incorrect")
-
 func (d *Seafile) decryptLibrary(repo *LibraryInfo) (err error) {
 	if !repo.Encrypted {
 		return nil
 	}
 	if d.RepoPwd == "" {
-		return repoPwdNotConfigured
+		return errors.New(fmt.Sprintf("seafile library[%s]: password not configured", repo.Name))
 	}
 	now := time.Now()
 	decryptedTime := repo.decryptedTime
@@ -153,7 +154,7 @@ func (d *Seafile) decryptLibrary(repo *LibraryInfo) (err error) {
 		}
 	} else {
 		if now.Sub(decryptedTime).Seconds() <= 10 {
-			return repoPwdIncorrect
+			return errors.New(fmt.Sprintf("seafile library[%s]: password is incorrect", repo.Name))
 		}
 	}
 	var resp string
@@ -165,7 +166,10 @@ func (d *Seafile) decryptLibrary(repo *LibraryInfo) (err error) {
 	repo.decryptedTime = time.Now()
 	if err != nil || !strings.Contains(resp, "success") {
 		repo.decryptedSuccess = false
-		return err
+		if err != nil {
+			return err
+		}
+		return errors.New(fmt.Sprintf("seafile library[%s]: password verification failed", repo.Name))
 	}
 	repo.decryptedSuccess = true
 	return nil
