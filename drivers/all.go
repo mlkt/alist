@@ -62,6 +62,7 @@ import (
 	_ "github.com/alist-org/alist/v3/drivers/weiyun"
 	_ "github.com/alist-org/alist/v3/drivers/wopan"
 	_ "github.com/alist-org/alist/v3/drivers/yandex_disk"
+	_ "github.com/alist-org/alist/v3/drivers/kopia"
 )
 
 // All do nothing,just for import
